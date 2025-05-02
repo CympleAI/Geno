@@ -1,93 +1,88 @@
 use anyhow::{Result, anyhow};
-use log::{info, debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs;
-use std::path::Path;
 
-use crate::agent::{Agent, Message, TaskResult};
-use crate::prompts::react::REACT_PROMPT;
+use crate::agent::{Agent, Message, TaskResult, TaskContext};
+use crate::agent::prompt::REACT_PROMPT;
 
-impl Agent {
-    /// Handle the task with ReAct
-    pub fn run_with_react(&mut self, input_content: Option<String>, output_path: &str) -> Result<String> {
-        info!("Starting ReAct loop for task: {}", self.task);
+/// Handle the task with ReAct
+pub async fn run_with_react(agent: &Agent, context: &mut TaskContext) -> Result<String> {
+    info!("Starting ReAct loop for task: {}", context.task);
 
-        // init task context
-        let initial_context = input_content.unwrap_or_default();
-        self.messages.push(Message {
-            role: "system".to_string(),
-            content: format!("Task: {}\nContext: {}", self.task, initial_context),
+    // init task context
+    context.memory.push(Message {
+        role: "system".to_string(),
+        content: format!("Task: {}", context.task),
+    });
+
+    // ReAct
+    for step in 0..agent.max_step {
+        info!("ReAct step {}/{}", step + 1, agent.max_step);
+
+        // Thought: generate the step
+        let thought_prompt = build_thought_prompt(agent, context)?;
+
+        let thought = call_llm(&thought_prompt)?;
+
+        context.memory.push(Message {
+            role: "thought".to_string(),
+            content: thought.clone(),
+        });
+        debug!("Thought: {}", thought);
+
+        // Action: parse and action
+        let action = parse_action(&thought)?;
+
+        let tool_output = agent.tool_call(&action.tool, &action.input).await?;
+
+        context.memory.push(Message {
+            role: "action".to_string(),
+            content: format!("Tool: {}, Input: {}, Output: {}", action.tool, action.input, tool_output),
+        });
+        debug!("Action: tool={}, input={}, output={}", action.tool, action.input, tool_output);
+
+        // Observation: collect the result
+        context.memory.push(Message {
+            role: "observation".to_string(),
+            content: tool_output.clone(),
         });
 
-        // ReAct
-        for iteration in 0..self.max_iterations {
-            info!("ReAct iteration {}/{}", iteration + 1, self.max_iterations);
-
-            // Thought: generate the step
-            let thought_prompt = build_thought_prompt(&self)?;
-
-            let thought = call_llm(&thought_prompt)?;
-
-            self.messages.push(Message {
-                role: "thought".to_string(),
-                content: thought.clone(),
+        // check task is finished
+        if is_task_complete(context, &tool_output)? {
+            info!("Task completed successfully");
+            context.history.push(TaskResult {
+                task: context.task.clone(),
+                success: true,
+                output: tool_output.clone(),
+                feedback: None,
             });
-            debug!("Thought: {}", thought);
-
-            // Action: parse and action
-            let action = parse_action(&thought)?;
-
-            let tool_output = invoke_tool(&action.tool, &action.input, &self)?;
-
-            self.messages.push(Message {
-                role: "action".to_string(),
-                content: format!("Tool: {}, Input: {}, Output: {}", action.tool, action.input, tool_output),
-            });
-            debug!("Action: tool={}, input={}, output={}", action.tool, action.input, tool_output);
-
-            // Observation: collect the result
-            self.messages.push(Message {
-                role: "observation".to_string(),
-                content: tool_output.clone(),
-            });
-
-            // check task is finished
-            if is_task_complete(&self, &tool_output, output_path)? {
-                info!("Task completed successfully");
-                self.history.push(TaskResult {
-                    task: self.task.clone(),
-                    success: true,
-                    output: tool_output.clone(),
-                    feedback: None,
-                });
-                return Ok(tool_output);
-            }
+            return Ok(tool_output);
         }
-
-        // if task not finished in the limit times, record it
-        warn!("Task failed to complete within {} iterations", self.max_iterations);
-        self.history.push(TaskResult {
-            task: self.task.clone(),
-            success: false,
-            output: "Failed to complete task".to_string(),
-            feedback: Some(format!("Reached maximum iterations: {}", self.max_iterations)),
-        });
-
-        Err(anyhow!("Task failed to complete within {} iterations", self.max_iterations))
     }
+
+    // if task not finished in the limit times, record it
+    warn!("Task failed to complete within {} steps", agent.max_step);
+    context.history.push(TaskResult {
+        task: context.task.clone(),
+        success: false,
+        output: "Failed to complete task".to_string(),
+        feedback: Some(format!("Reached maximum steps: {}", agent.max_step)),
+    });
+
+    Err(anyhow!("Task failed to complete within {} steps", agent.max_step))
 }
 
+
 // Build Thought prompt
-fn build_thought_prompt(state: &Agent) -> Result<String> {
+fn build_thought_prompt(agent: &Agent, context: &TaskContext) -> Result<String> {
     // collect history
-    let messages = state.messages.iter()
+    let messages = context.memory.iter()
         .map(|m| format!("[{}] {}", m.role, m.content))
         .collect::<Vec<_>>()
         .join("\n");
 
     // aviable tools
-    let tools = state.tools.iter()
+    let tools = agent.tools.iter()
         .map(|t| format!("- {}: {}", t.name, t.description))
         .collect::<Vec<_>>()
         .join("\n");
@@ -95,7 +90,7 @@ fn build_thought_prompt(state: &Agent) -> Result<String> {
     // build prompt
     let prompt = format!(
         "{}\n\nCurrent Task: {}\nAvailable Tools:\n{}\nMessages:\n{}\n\nGenerate the next reasoning step (Thought) and suggest an Action in JSON format:\n```json\n{{\"tool\": \"<tool_name>\", \"input\": \"<input_string>\"}}\n```",
-        REACT_PROMPT, state.task, tools, messages
+        REACT_PROMPT, context.task, tools, messages
     );
     Ok(prompt)
 }
@@ -122,32 +117,21 @@ fn parse_action(thought: &str) -> Result<Action> {
     Ok(action)
 }
 
-// call the tool
-fn invoke_tool(tool: &str, input: &str, state: &mut AgentState) -> Result<String> {
-    // find the tool
-    let tool = state.tools.iter()
-        .find(|t| t.name == tool)
-        .ok_or_else(|| anyhow!("Tool '{}' not found", tool))?;
-
-    // tool call
-    (tool.invoke)(input, state)
-}
-
 // check task is finished
-fn is_task_complete(state: &AgentState, output: &str, output_path: &str) -> Result<bool> {
+fn is_task_complete(context: &mut TaskContext, output: &str) -> Result<bool> {
     // condition：
     // 1. output with "success" tag
     // 2. WASM compiled file
     // 3. custom user condition
-    if output.contains("success") || Path::new(output_path).exists() {
-        info!("Completion condition met: output='{}', file_exists={}", output, output_path);
+    if output.contains("success") {
+        info!("Completion condition met: output='{}'", output);
         return Ok(true);
     }
 
     // check if has failure tag
     if output.contains("error") || output.contains("failed") {
-        state.history.push(TaskResult {
-            task: state.task.clone(),
+        context.history.push(TaskResult {
+            task: context.task.clone(),
             success: false,
             output: output.to_string(),
             feedback: Some("Tool reported an error".to_string()),
