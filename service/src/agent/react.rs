@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::agent::{Agent, Message, TaskResult, TaskContext};
+use crate::agent::action::Action;
 use crate::agent::prompt::REACT_PROMPT;
 
 /// Handle the task with ReAct
@@ -33,13 +34,13 @@ pub async fn run_with_react(agent: &Agent, context: &mut TaskContext) -> Result<
         // Action: parse and action
         let action = parse_action(&thought)?;
 
-        let tool_output = agent.tool_call(&action.tool, &action.input).await?;
+        let tool_output = agent.action(&action).await?;
 
         context.memory.push(Message {
             role: "action".to_string(),
-            content: format!("Tool: {}, Input: {}, Output: {}", action.tool, action.input, tool_output),
+            content: format!("{}, Output: {}", action.format(), tool_output),
         });
-        debug!("Action: tool={}, input={}, output={}", action.tool, action.input, tool_output);
+        debug!("Action: {}, output={}", action.format(), tool_output);
 
         // Observation: collect the result
         context.memory.push(Message {
@@ -83,7 +84,7 @@ fn build_thought_prompt(agent: &Agent, context: &TaskContext) -> Result<String> 
 
     // aviable tools
     let tools = agent.tools.iter()
-        .map(|t| format!("- {}: {}", t.name, t.description))
+        .map(|(n, t)| format!("- {}: {}", n, t.description))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -95,13 +96,6 @@ fn build_thought_prompt(agent: &Agent, context: &TaskContext) -> Result<String> 
     Ok(prompt)
 }
 
-// parse Action（LLM response JSON）
-#[derive(Debug, Deserialize, Serialize)]
-struct Action {
-    tool: String,
-    input: String,
-}
-
 fn parse_action(thought: &str) -> Result<Action> {
     //  JSON
     let json_start = thought.find("```json").ok_or_else(|| anyhow!("No JSON block found in thought"))? + 7;
@@ -109,11 +103,11 @@ fn parse_action(thought: &str) -> Result<Action> {
     let json_str = &thought[json_start..json_end].trim();
 
     // parse JSON
-    let action: Action = serde_json::from_str(json_str)
-        .map_err(|e| anyhow!("Failed to parse action JSON: {}", e))?;
+    let action = Action::from_str(json_str)?;
 
     // check tool
-    debug!("Parsed action: tool={}, input={}", action.tool, action.input);
+    debug!("Parsed action: {}", action.format());
+
     Ok(action)
 }
 

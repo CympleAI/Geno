@@ -1,5 +1,5 @@
 mod react;
-// mod action;
+mod action;
 // mod interpreter;
 mod prompt;
 // mod evolution;
@@ -15,9 +15,9 @@ pub struct Agent {
     /// Successful cases and functions
     pub knowledge_base: HashMap<String, String>,
     /// Code examples
-    pub codes: Vec<String>,
+    pub codes: Vec<Code>,
     /// All avaiable tools
-    pub tools: Vec<Tool>,
+    pub tools: HashMap<String, Tool>,
     /// Max times for ReAct
     pub max_step: usize,
 }
@@ -48,7 +48,7 @@ impl Agent {
         Ok(Agent{
             knowledge_base: HashMap::new(),
             codes: vec![],
-            tools: vec![],
+            tools: HashMap::new(),
             max_step: config.max_step,
         })
     }
@@ -72,13 +72,23 @@ impl Agent {
         Ok(result)
     }
 
-    pub fn code_call(&self) {
-        //
-    }
-
-    pub async fn tool_call(&self, tool: &str, input: &str) -> Result<String> {
-        // TODO
-        Ok("success".to_owned())
+    pub async fn action(&self, action: &action::Action) -> Result<String> {
+        match action {
+            Action::Code(code) => {
+                // TODO
+                Ok("code".to_owned())
+            }
+            Action::Tool(name, input) => {
+                if let Some(tool) = self.tools.get(name) {
+                    tool.call(input).await
+                }
+                // TODO
+                Ok("success".to_owned())
+            }
+            Action::Unknown => {
+                Ok("unknown".to_owned())
+            }
+        }
     }
 }
 
@@ -96,5 +106,5 @@ pub struct Message {
 pub struct Tool {
     pub name: String,
     pub description: String,
-    // pub invoke: fn(&str, &mut TaskContext) -> Result<String>,
+    pub call: async fn(&str) -> Result<String>
 }
