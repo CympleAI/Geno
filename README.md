@@ -21,5 +21,13 @@ An open and free future personal assistant system
   - Data analysis services
   - AI agent framework with self-upgrade capability
 
+## How to build?
+- Core AI-agents system
+- Communication based on matrix
+- Official messages/tasks based on email
+- News based on RSS
+- Other social and media platform access/bridge
+...
+
 ## How to run a personal assistant?
 We are building...

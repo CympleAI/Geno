@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["service", "proxy"]
+members = ["agent", "proxy", "types"]
 
 [workspace.package]
 version = "0.0.1"
